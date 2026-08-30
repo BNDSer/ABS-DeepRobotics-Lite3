@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import os
 import sys
 from isaacgym import gymapi
 from isaacgym import gymutil
@@ -52,9 +53,11 @@ class BaseTask():
         else:
             self.device = 'cpu'
 
-        # graphics device for rendering, -1 for no rendering
+        # Keep graphics available for optional camera-only rendering in headless mode.
+        # The default remains the original behavior: headless simulations disable graphics.
+        self.offscreen_render = os.environ.get("LEGGED_GYM_OFFSCREEN_RENDER", "0") == "1"
         self.graphics_device_id = self.sim_device_id
-        if self.headless == True:
+        if self.headless and not self.offscreen_render:
             self.graphics_device_id = -1
 
         self.num_envs = cfg.env.num_envs

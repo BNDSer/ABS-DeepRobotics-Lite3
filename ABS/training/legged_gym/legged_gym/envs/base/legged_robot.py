@@ -807,10 +807,20 @@ class LeggedRobot(BaseTask):
         self.envs = []
         if self.cfg.asset.load_dynamic_object:
             self.object_handles = []
+        self.color_camera_tensors = []
+        self.color_cam_obs = None
         if self.cfg.sensors.depth_cam.enable:
             self.camera_handles = []
             self.camera_tensors = []
             self.cam_obs = torch.zeros((self.num_envs, self.cfg.sensors.depth_cam.resolution[1], self.cfg.sensors.depth_cam.resolution[0]), device = self.device)
+            if self.offscreen_render:
+                self.color_cam_obs = torch.empty(
+                    (self.num_envs,
+                     self.cfg.sensors.depth_cam.resolution[1],
+                     self.cfg.sensors.depth_cam.resolution[0],
+                     4),
+                    dtype=torch.uint8,
+                    device='cpu')
             camera_props = gymapi.CameraProperties()
             camera_props.enable_tensors = True
             camera_props.width = self.cfg.sensors.depth_cam.resolution[0]
@@ -868,6 +878,9 @@ class LeggedRobot(BaseTask):
                 camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_DEPTH)
                 torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
                 self.camera_tensors.append(torch_cam_tensor)        
+                if self.offscreen_render:
+                    color_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_COLOR)
+                    self.color_camera_tensors.append(gymtorch.wrap_tensor(color_tensor))
         
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -980,7 +993,15 @@ class LeggedRobot(BaseTask):
         if self.cfg.sensors.depth_cam.enable:
             for env_id in range(self.num_envs):
                 self.cam_obs[env_id] = (-1.0 * self.camera_tensors[env_id]).clip(min=self.cfg.sensors.depth_cam.min_, max=self.cfg.sensors.depth_cam.max_)
+                if self.color_cam_obs is not None:
+                    self.color_cam_obs[env_id].copy_(self.color_camera_tensors[env_id].cpu())
         return
+
+    def get_color_image(self, env_id=0):
+        """Return the latest RGBA camera frame as a CPU uint8 tensor."""
+        if self.color_cam_obs is None or not self.color_camera_tensors:
+            raise RuntimeError("RGB camera is not enabled; set LEGGED_GYM_OFFSCREEN_RENDER=1 and enable depth_cam")
+        return self.color_cam_obs[env_id]
 
     def render_cameras(self):        
         self.gym.render_all_camera_sensors(self.sim)
