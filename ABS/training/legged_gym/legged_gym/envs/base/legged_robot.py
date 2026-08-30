@@ -876,11 +876,12 @@ class LeggedRobot(BaseTask):
                 self.gym.attach_camera_to_body(cam_handle, env_handle, actor_handle, camera_transform, gymapi.FOLLOW_TRANSFORM)
                 self.camera_handles.append(cam_handle)
                 camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_DEPTH)
-                torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor)
+                torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor) if camera_tensor is not None else None
                 self.camera_tensors.append(torch_cam_tensor)        
                 if self.offscreen_render:
                     color_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_COLOR)
-                    self.color_camera_tensors.append(gymtorch.wrap_tensor(color_tensor))
+                    color_torch_tensor = gymtorch.wrap_tensor(color_tensor) if color_tensor is not None else None
+                    self.color_camera_tensors.append(color_torch_tensor)
         
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -992,10 +993,30 @@ class LeggedRobot(BaseTask):
     def dump_depth(self):
         if self.cfg.sensors.depth_cam.enable:
             for env_id in range(self.num_envs):
-                self.cam_obs[env_id] = (-1.0 * self.camera_tensors[env_id]).clip(min=self.cfg.sensors.depth_cam.min_, max=self.cfg.sensors.depth_cam.max_)
+                depth_tensor = self.camera_tensors[env_id]
+                if depth_tensor is not None:
+                    self.cam_obs[env_id] = (-1.0 * depth_tensor).clip(min=self.cfg.sensors.depth_cam.min_, max=self.cfg.sensors.depth_cam.max_)
                 if self.color_cam_obs is not None:
-                    self.color_cam_obs[env_id].copy_(self.color_camera_tensors[env_id].cpu())
+                    color_tensor = self.color_camera_tensors[env_id]
+                    if color_tensor is not None:
+                        self.color_cam_obs[env_id].copy_(color_tensor.cpu())
         return
+
+    def dump_color_cpu(self):
+        """Fallback for Isaac Gym builds that do not expose GPU camera tensors."""
+        if self.color_cam_obs is None:
+            return
+        for env_id, color_tensor in enumerate(self.color_camera_tensors):
+            if color_tensor is not None:
+                continue
+            image = self.gym.get_camera_image(
+                self.sim, self.envs[env_id], self.camera_handles[env_id], gymapi.IMAGE_COLOR)
+            if image is None:
+                raise RuntimeError("Isaac Gym returned no RGB camera image")
+            image = np.asarray(image)
+            if image.ndim != 3 or image.shape[-1] != 4:
+                raise RuntimeError(f"Unexpected CPU RGB camera image shape: {image.shape}")
+            self.color_cam_obs[env_id].copy_(torch.from_numpy(image))
 
     def get_color_image(self, env_id=0):
         """Return the latest RGBA camera frame as a CPU uint8 tensor."""
@@ -1005,9 +1026,13 @@ class LeggedRobot(BaseTask):
 
     def render_cameras(self):        
         self.gym.render_all_camera_sensors(self.sim)
-        self.gym.start_access_image_tensors(self.sim)
+        tensor_access = any(tensor is not None for tensor in self.camera_tensors + self.color_camera_tensors)
+        if tensor_access:
+            self.gym.start_access_image_tensors(self.sim)
         self.dump_depth()
-        self.gym.end_access_image_tensors(self.sim)
+        if tensor_access:
+            self.gym.end_access_image_tensors(self.sim)
+        self.dump_color_cpu()
         return
 
     def _get_heights(self, env_ids=None):
