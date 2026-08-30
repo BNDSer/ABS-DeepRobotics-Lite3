@@ -87,7 +87,8 @@ class LeggedRobot(BaseTask):
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         # step physics and render each frame
         
-        if self.cfg.sensors.depth_cam.enable: self.render_cameras()
+        if self.cfg.sensors.depth_cam.enable and not self.offscreen_render:
+            self.render_cameras()
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
@@ -96,6 +97,10 @@ class LeggedRobot(BaseTask):
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
         self.post_physics_step()
+        # Camera rendering must happen after the physics step and graphics update;
+        # otherwise CPU readback can return the initial (black) image buffer.
+        if self.cfg.sensors.depth_cam.enable and self.offscreen_render:
+            self.render_cameras()
         self.render()
 
         # return clipped obs, clipped states (None), rewards, dones and infos
@@ -1036,6 +1041,9 @@ class LeggedRobot(BaseTask):
         return self.color_cam_obs[env_id]
 
     def render_cameras(self):        
+        if self.offscreen_render and self.device != 'cpu':
+            self.gym.fetch_results(self.sim, True)
+            self.gym.step_graphics(self.sim)
         self.gym.render_all_camera_sensors(self.sim)
         tensor_access = any(tensor is not None for tensor in self.camera_tensors + self.color_camera_tensors)
         if tensor_access:
