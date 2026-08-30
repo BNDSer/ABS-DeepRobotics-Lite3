@@ -822,7 +822,8 @@ class LeggedRobot(BaseTask):
                     dtype=torch.uint8,
                     device='cpu')
             camera_props = gymapi.CameraProperties()
-            camera_props.enable_tensors = True
+            # Avoid CUDA external-memory camera failures in headless Preview 4.
+            camera_props.enable_tensors = not self.offscreen_render
             camera_props.width = self.cfg.sensors.depth_cam.resolution[0]
             camera_props.height = self.cfg.sensors.depth_cam.resolution[1]
             camera_props.far_plane = self.cfg.sensors.depth_cam.far_plane
@@ -875,10 +876,14 @@ class LeggedRobot(BaseTask):
                 cam_handle = self.gym.create_camera_sensor(env_handle, camera_props)
                 self.gym.attach_camera_to_body(cam_handle, env_handle, actor_handle, camera_transform, gymapi.FOLLOW_TRANSFORM)
                 self.camera_handles.append(cam_handle)
-                camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_DEPTH)
+                camera_tensor = None
+                if not self.offscreen_render:
+                    camera_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_DEPTH)
                 torch_cam_tensor = gymtorch.wrap_tensor(camera_tensor) if camera_tensor is not None else None
                 self.camera_tensors.append(torch_cam_tensor)        
                 if self.offscreen_render:
+                    self.color_camera_tensors.append(None)
+                else:
                     color_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, env_handle, cam_handle, gymapi.IMAGE_COLOR)
                     color_torch_tensor = gymtorch.wrap_tensor(color_tensor) if color_tensor is not None else None
                     self.color_camera_tensors.append(color_torch_tensor)
@@ -1014,6 +1019,12 @@ class LeggedRobot(BaseTask):
             if image is None:
                 raise RuntimeError("Isaac Gym returned no RGB camera image")
             image = np.asarray(image)
+            expected = (
+                self.cfg.sensors.depth_cam.resolution[1],
+                self.cfg.sensors.depth_cam.resolution[0],
+                4)
+            if image.ndim == 2 and image.shape == (expected[0], expected[1] * expected[2]):
+                image = image.reshape(expected)
             if image.ndim != 3 or image.shape[-1] != 4:
                 raise RuntimeError(f"Unexpected CPU RGB camera image shape: {image.shape}")
             self.color_cam_obs[env_id].copy_(torch.from_numpy(image))
